@@ -41,7 +41,6 @@ int calculateBlue(int hue)
     return map(hue, 0, 359, 0, 255);
 }
 
-const int delayTime = 10; // Delay time between color changes
 void setup()
 {
     pinMode(RED, OUTPUT);
