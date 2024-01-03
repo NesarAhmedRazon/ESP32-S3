@@ -1,79 +1,182 @@
-
-#include <SparkFun_TB6612.h>
 #include <Arduino.h>
-// Pins for all inputs, keep in mind the PWM defines must be on PWM pins
-// the default pins listed are the ones used on the Redbot (ROB-12097) with
-// the exception of STBY which the Redbot controls with a physical switch
-#define AIN1 7
-#define AIN2 44
-#define PWMA 43
-#define STBY 9
-#define RED 1
-#define GREEN 3
-#define BLUE 5
+#include <SPI.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include "AsyncJson.h"
+#include "ArduinoJson.h"
+#include "index.h"
+#include <Adafruit_NeoPixel.h>
+#include <Wire.h>
+#include "Adafruit_DRV2605.h"
 
-// these constants are used to allow you to make your motor configuration
-// line up with function names like forward.  Value can be 1 or -1
-const int offsetA = 1;
-const int offsetB = 1;
-int hue = 0; // Hue value for the rainbow effect
+#define LED_PIN 21
+#define BTN_PIN 0
 
-// Initializing motors.  The library will allow you to initialize as many
-// motors as you have memory for.  If you are using functions like forward
-// that take 2 motors as arguements you can either write new functions or
-// call the function more than once.
-Motor motor1 = Motor(AIN1, AIN2, PWMA, offsetA, STBY);
-int calculateRed(int hue)
+// create a variable to store the current effect
+uint8_t currentEffect = 123;
+
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(1, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_DRV2605 drv;
+
+AsyncWebServer server(80);
+const char *ssid = "Nesar";
+const char *password = "fiberwings1431";
+
+void notFound(AsyncWebServerRequest *request)
 {
-    // Calculate the red component based on the hue
-    return map(hue, 0, 359, 255, 0);
+    request->send(404, "application/json", "{\"message\":\"Not found\"}");
 }
 
-int calculateGreen(int hue)
+// Fill the dots one after the other with a color
+void colorWipe(uint32_t c, uint8_t wait)
 {
-    // Calculate the green component based on the hue
-    return map(hue, 0, 359, 0, 255);
+    for (uint16_t i = 0; i < strip.numPixels(); i++)
+    {
+        strip.setPixelColor(i, c);
+        strip.show();
+        delay(wait);
+    }
 }
 
-int calculateBlue(int hue)
+void setLedRed()
 {
-    // Calculate the blue component based on the hue
-    return map(hue, 0, 359, 0, 255);
+    colorWipe(strip.Color(100, 0, 100), 50); // Red
+}
+// Function to add a nested array to a JsonObject
+void addNestedArray(JsonObject parent, const char *key, std::initializer_list<int> values)
+{
+    JsonArray nestedArray = parent.createNestedArray(key);
+    for (int value : values)
+    {
+        nestedArray.add(value);
+    }
 }
 
 void setup()
 {
-    pinMode(RED, OUTPUT);
-    pinMode(GREEN, OUTPUT);
-    pinMode(BLUE, OUTPUT); // Nothing here
+
+    const size_t capacity = JSON_OBJECT_SIZE(5) + 5 * JSON_ARRAY_SIZE(3); // Adjust the size based on your data
+    DynamicJsonDocument doc(capacity);
+
+    // Create a root JsonObject within the document
+    JsonObject effects = doc.to<JsonObject>();
+    // Add nested arrays dynamically
+    addNestedArray(effects, "strong_click", {1, 2, 3});
+    addNestedArray(effects, "soft_click", {4, 5, 6});
+    addNestedArray(effects, "buzz", {10, 11, 12});
+    addNestedArray(effects, "smooth_hum", {118, 119, 120, 121, 122, 123});
+
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    while (WiFi.waitForConnectResult() != WL_CONNECTED)
+    {
+        Serial.printf("WiFi Failed!\n");
+    }
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Initialize LED to red
+    setLedRed();
+    if (!drv.begin())
+    {
+        Serial.println("Could not find DRV2605");
+        while (1)
+            delay(10);
+    }
+    drv.selectLibrary(1);
+    drv.setMode(DRV2605_MODE_INTTRIG);
+
+    // HOME PAGE
+    server.on("/", HTTP_GET, [effects](AsyncWebServerRequest *request)
+              { request->send(200, "text/html", home_page); });
+
+    // Get Effect REQUEST with effect name parameter and make that string lowercase
+    server.on("/get-effect", HTTP_GET, [effects](AsyncWebServerRequest *request)
+              {
+        StaticJsonDocument<100> data;
+
+        if (request->hasParam("effect")) {
+            String newEffect = request->getParam("effect")->value();
+            newEffect.toLowerCase();
+
+            // check if the effect exists in the effects object
+            if (effects.containsKey(newEffect)) {
+                // get the effect array
+                JsonArray effect = effects[newEffect];
+                // if the newEffect exists in the effects object, get the effect size from the array
+                
+                    int effectSize = effect.size();
+                    uint8_t effectNumber = effect[0];
+                    // if the request has a var parameter, get the effect number from the array
+                    if(request->hasParam("var")){
+                        int var = request->getParam("var")->value().toInt();
+                        effectNumber = effect[var];
+                    } 
+                    // get the effect number from the array
+                    
+                    // set the current effect to the effect number
+                    currentEffect = effectNumber;
+                    data["effect"] = newEffect;
+                    data["effectNumber"] = effectNumber;
+                    data["effectSize"] = effectSize;
+                
+            } else {
+                data["effect"] = "smooth_hum";
+                data["effectNumber"] = 123;
+                data["effectSize"] = 6;
+            } 
+        } else {
+            data["effect"] = "smooth_hum";
+            data["effectNumber"] = 123;
+            data["effectSize"] = 6;
+        }
+
+        String response;
+        serializeJson(data, response);
+        request->send(200, "application/json", response); });
+
+    // Controll Get REQUEST
+    server.on("/effects", HTTP_GET, [effects](AsyncWebServerRequest *request)
+              {
+        StaticJsonDocument<100> data;
+
+        // get the effects object, and send it to the client as json data
+        data["effects"] = effects;
+        String response;
+        serializeJson(data, effects);
+        request->send(200, "application/json", response); });
+
+    // Controll Post REQUEST
+    AsyncCallbackJsonWebHandler *handler = new AsyncCallbackJsonWebHandler("/post-message", [effects](AsyncWebServerRequest *request, JsonVariant &json)
+                                                                           {
+        StaticJsonDocument<200> data;
+        if (json.is<JsonArray>()) {
+            data = json.as<JsonArray>();
+        } else if (json.is<JsonObject>()) {
+            data = json.as<JsonObject>();
+        }
+        String response;
+        serializeJson(data, response);
+        request->send(200, "application/json", response);
+        Serial.println(response); });
+    server.addHandler(handler);
+
+    // Not Found PAGE
+    server.onNotFound(notFound);
+    server.begin();
 }
 
 void loop()
 {
-    // Use of the drive function which takes as arguements the speed
-    // and optional duration.  A negative speed will cause it to go
-    // backwards.  Speed can be from -255 to 255.  Also use of the
-    // brake function which takes no arguements.
-    motor1.drive(255, 1000);
-    motor1.drive(-100, 1000);
-    motor1.brake();
-    delay(delayTime);
-    // Calculate the RGB values based on the hue
-    int r = calculateRed(hue);
-    int g = calculateGreen(hue);
-    int b = calculateBlue(hue);
 
-    // Set the RGB colors using analogWrite
-    analogWrite(RED, r);
-    analogWrite(GREEN, g);
-    analogWrite(BLUE, b);
+    // set the effect to play
+    drv.setWaveform(0, currentEffect); // play effect
+    drv.setWaveform(1, 0);             // end waveform
 
-    // Increment the hue for the next color
-    hue += 1;
-    if (hue > 359)
-    {
-        hue = 0;
-    }
+    // play the effect!
+    drv.go();
 
-    delay(delayTime);
+    // wait a bit
+    delay(500);
 }
